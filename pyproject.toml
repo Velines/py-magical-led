@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-magical-led"
+version = "0.6.0"
+description = "Magical LED 1.2.0 strip-control protocol and asynchronous BLE CLI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+ble = ["bleak>=3.0.2"]
+
+[project.scripts]
+magical-led = "magical_led.cli:main"
+
+[tool.setuptools]
+packages = ["magical_led"]

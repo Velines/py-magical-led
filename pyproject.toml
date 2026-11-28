@@ -14,6 +14,7 @@ dependencies = []
 
 [project.optional-dependencies]
 ble = ["bleak>=3.0.2"]
+images = ["pillow>=10.0.0"]
 
 [project.scripts]
 magical-led = "magical_led.cli:main"

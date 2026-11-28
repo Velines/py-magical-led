@@ -317,10 +317,13 @@ def main(argv=None):
     batch_cmd = sub.add_parser('batch', help='run multiple control steps over one BLE connection')
     batch_cmd.add_argument('steps', nargs='+', metavar='STEP', help='quoted command steps, e.g. "on" "color ff8040" "sleep 2" "off"')
     batch_cmd.add_argument('--delay', type=_gap, default=0.5, help='gap between consecutive frames in seconds (default: 0.5)')
-    playback = sub.add_parser('play', help='play JSON RGB frames live; no upload or save')
+    playback = sub.add_parser('play', help='play JSON RGB frames live, buffered (--buffered), or persistent (--persist)')
     playback.add_argument('file', help='JSON object with a frames array')
-    playback.add_argument('--fps', type=_finite, default=1, help='requested ceiling; BLE may be slower')
-    playback.add_argument('--repeat', type=_positive, default=1)
+    playback.add_argument('--fps', type=_finite, default=1, help='requested ceiling for live mode; BLE may be slower')
+    playback.add_argument('--repeat', type=_positive, default=None, help='live mode cycle count (default: 1)')
+    playback.add_argument('--buffered', action='store_true', help='upload as temporary controller-managed buffered animation')
+    playback.add_argument('--persist', action='store_true', help='persist to controller custom slot (overwrites existing custom content)')
+    playback.add_argument('--wire-speed', type=int, choices=range(1, 11), default=10, help='buffered/persist wire speed 1..10 (default: 10)')
     playback.add_argument('--brightness', type=_octet)
     playback.add_argument('--flip-x', action='store_true')
     playback.add_argument('--flip-y', action='store_true')
@@ -564,6 +567,40 @@ def main(argv=None):
         if args.cmd == 'play':
             frames = _load_frames(args.file)
             mapping = FrameMapping(transpose=args.transpose, flip_x=args.flip_x, flip_y=args.flip_y)
+            use_buffered = args.buffered or args.persist
+            if use_buffered:
+                if args.repeat is not None:
+                    raise ValueError('buffered playback is autonomous; omit --repeat')
+                if args.dry_run:
+                    import hashlib
+                    h, w = len(frames[0]), len(frames[0][0]) if len(frames[0]) else 0
+                    topology = Topology(h, w) if args.transpose else Topology(w, h)
+                    transfer = encode_animation(frames, topology, mapping=mapping, wire_speed=args.wire_speed)
+                    print(json.dumps({
+                        'source': 'offline custom-animation upload plan; not connected',
+                        'width': topology.width, 'height': topology.height,
+                        'frame_count': transfer.frame_count, 'bytes': len(transfer.payload),
+                        'chunks': len(transfer.chunks), 'assumed_chunk_payload_capacity': 96,
+                        'header_plain': transfer.header.hex(),
+                        'payload_sha256': hashlib.sha256(transfer.payload).hexdigest(),
+                        'wire_speed': args.wire_speed, 'persistent_save_requested': args.persist,
+                        'save_command_hex': plaintext('SMVEW', 2).hex() if args.persist else None,
+                    }, indent=2))
+                else:
+                    async with connect(args.device, timeout=args.timeout) as strip:
+                        if args.persist:
+                            result = await strip.store_animation(
+                                frames, overwrite=True, mapping=mapping,
+                                wire_speed=args.wire_speed, brightness=args.brightness,
+                            )
+                        else:
+                            result = await strip.play_animation(
+                                frames, mapping=mapping,
+                                wire_speed=args.wire_speed, brightness=args.brightness,
+                            )
+                        _playback_result(result)
+                return
+            repeat = 1 if args.repeat is None else args.repeat
             if args.dry_run:
                 # Offline dimensions come from input, never a fake device report.
                 h, w = len(frames[0]), len(frames[0][0]) if len(frames[0]) else 0
@@ -572,16 +609,16 @@ def main(argv=None):
                 within = sum(sum(a != b for a, b in zip(previous, current))
                              for previous, current in zip(prepared, prepared[1:]))
                 boundary = sum(a != b for a, b in zip(prepared[-1], prepared[0]))
-                writes = topology.pixel_count + within * args.repeat + boundary * (args.repeat - 1)
+                writes = topology.pixel_count + within * repeat + boundary * (repeat - 1)
                 print(json.dumps({'source': 'offline input dimensions; NOT read from device',
                                   'width': topology.width, 'height': topology.height,
-                                  'frames': len(prepared) * args.repeat, 'pixel_writes': writes,
+                                  'frames': len(prepared) * repeat, 'pixel_writes': writes,
                                   'requested_fps': args.fps, 'pixel_delay_seconds': 0,
                                   'saved_to_controller': False}, indent=2))
             else:
                 async with connect(args.device, timeout=args.timeout) as strip:
                     result = await strip.play_frames(frames, mapping=mapping, fps=args.fps,
-                                                     repeat=args.repeat, brightness=args.brightness)
+                                                     repeat=repeat, brightness=args.brightness)
                     _playback_result(result)
             return
         if args.cmd == 'scan':

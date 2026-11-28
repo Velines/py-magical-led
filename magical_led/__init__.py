@@ -19,6 +19,7 @@ from .buffered import StorageCapabilities, PersistentStoreResult, StorageUnsuppo
 from .state import (WEEKDAYS, DeviceState, Schedule, ScheduleRule, VersionInfo,
                     mask_to_weekdays, parse_schedule, parse_version_notification,
                     schedule, weekday_mask)
+from .media import load_image_frames
 
 __all__ = ['Strip', 'brightness', 'clock', 'color', 'connect', 'decrypt', 'encrypt',
            'plaintext', 'power', 'scan', 'animation', 'effect', 'effect_scene',
@@ -30,4 +31,4 @@ __all__ = ['Strip', 'brightness', 'clock', 'color', 'connect', 'decrypt', 'encry
            'StorageCapabilities', 'PersistentStoreResult', 'StorageUnsupportedError',
            'WEEKDAYS', 'DeviceState', 'Schedule', 'ScheduleRule', 'VersionInfo',
            'mask_to_weekdays', 'parse_schedule', 'parse_version_notification',
-           'schedule', 'weekday_mask']
+           'schedule', 'weekday_mask', 'load_image_frames']

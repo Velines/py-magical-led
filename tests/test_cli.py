@@ -65,6 +65,18 @@ class CliTests(unittest.TestCase):
         self.assertFalse(summary['saved_to_controller'])
         for options in [('--fps', 'nan'), ('--fps', '0'), ('--repeat', '0')]:
             self.assertEqual(self.invoke('--dry-run', 'play', 'tests/fixtures/tiny-frames.json', *options).returncode, 2)
+        result = self.invoke('--dry-run', 'play', 'tests/fixtures/tiny-frames.json', '--buffered', '--wire-speed', '5')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buf = json.loads(result.stdout)
+        self.assertEqual((buf['frame_count'], buf['wire_speed'], buf['persistent_save_requested']), (2, 5, False))
+        self.assertIsNone(buf['save_command_hex'])
+        result = self.invoke('--dry-run', 'play', 'tests/fixtures/tiny-frames.json', '--persist')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pers = json.loads(result.stdout)
+        self.assertTrue(pers['persistent_save_requested'])
+        self.assertEqual(pers['save_command_hex'], '06534d56455702000000000000000000')
+        result = self.invoke('--dry-run', 'play', 'tests/fixtures/tiny-frames.json', '--buffered', '--repeat', '2')
+        self.assertEqual(result.returncode, 1)
 
     def test_topology_preview_is_subscription_not_query(self):
         result = self.invoke('--dry-run', 'topology')

@@ -42,18 +42,29 @@ Discover compatible advertisements:
 magical-led scan
 ```
 
-Replace `DEVICE_ID` with the printed identifier. Windows and Linux generally
-use a Bluetooth address; macOS uses a CoreBluetooth UUID. Global options such
-as `--device`, `--timeout` and `--dry-run` go **before** the command.
+Replace `DEVICE_ID` with the printed identifier (or set `MAGICAL_LED_DEVICE`
+in your environment to omit `--device`). Windows and Linux generally use a
+Bluetooth address; macOS uses a CoreBluetooth UUID. Global options such as
+`--device`, `--timeout` and `--dry-run` go **before** the command.
 
 ```console
 magical-led --device DEVICE_ID on
 magical-led --device DEVICE_ID color ff8040 --brightness 50
 magical-led --device DEVICE_ID brightness 20 --color ff8040
+magical-led --device DEVICE_ID status --json
+magical-led --device DEVICE_ID sync-clock
+magical-led --device DEVICE_ID set-schedule --on 18:30 --on-days weekdays --off 23:00 --sync-clock
+magical-led --device DEVICE_ID schedule
+magical-led --device DEVICE_ID batch "on" "color ff8040 --brightness 50" "sleep 2" "off"
 magical-led --device DEVICE_ID version
 magical-led --device DEVICE_ID topology
+magical-led --device DEVICE_ID power-state --wait 5
 magical-led --device DEVICE_ID off
 ```
+
+`scan`, `version`, `power-state`, `schedule` and `status` accept `--json` for
+machine-readable output. `batch` runs multiple control steps over a single BLE
+connection.
 
 Try a command without connecting to a controller:
 
@@ -71,6 +82,13 @@ and speed are raw controller values from 0–255, not percentages. Brightness
 zero maps to one to match the app; use `off` for power-off. Supply `--color`
 when adjusting brightness for a static scene, because the current RGB value
 cannot be reliably read back.
+
+**Power readback:** `power-state` listens for a fresh controller notification;
+it sends no lighting commands. It prints `on`, `off`, or `unknown` if no report
+arrives. The tested controller did not report power in 10-second checks. The
+owner observed the LEDs turn on during the check that started with output off,
+even though no lighting command was sent. Connecting or subscribing may affect
+output on this controller.
 
 ## Python API
 
@@ -92,7 +110,10 @@ asyncio.run(main("DEVICE_ID"))
 `connect` owns and closes the connection, including on errors. Use
 `Strip(already_connected_client)` to borrow a Bleak-compatible connection.
 Related methods include `set_brightness`, `set_speed`, `set_effect`,
-`select_animation`, `select_image` and `read_version`.
+`select_animation`, `select_image`, `sync_clock`, `read_schedule`,
+`set_schedule`, `read_version`, `read_version_info` and `read_state`.
+Use `await strip.read_power(timeout=5)` for LED-output power: `True` means on,
+`False` means off, and `None` means no fresh report was received.
 
 For lower-level integrations, `plaintext`, `encrypt` and `decrypt` work offline;
 `send` accepts one plaintext command, while `send_sequence` serializes a group

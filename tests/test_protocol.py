@@ -1,11 +1,17 @@
 import unittest
 from datetime import datetime
 
-from magical_led import brightness, clock, color, decrypt, encrypt, plaintext, power
+from magical_led import brightness, clock, color, decrypt, encrypt, plaintext, power, parse_power_notification
 from magical_led.protocol import image_chunks, indexed_chunks
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_power_notification_matches_app_prefixes(self):
+        # Synthetic plaintext, not hardware captures.
+        self.assertIs(parse_power_notification(b'\x00LEDON' + bytes(10)), True)
+        self.assertIs(parse_power_notification(b'\xffLEDOFX' + bytes(9)), False)
+        for frame in (b'\x05LEDON\0\0', b'LEDON' + bytes(11), plaintext('LIGHTOFF'), plaintext('VER')):
+            self.assertIsNone(parse_power_notification(frame))
     def test_external_vectors(self):
         # trace: TEST-001 UR-001-AC1 SWR-001-AC1. .NET AES, not captured traffic.
         for frame, prefix, wire in (

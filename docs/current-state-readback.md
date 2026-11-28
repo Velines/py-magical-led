@@ -95,6 +95,57 @@ Therefore the app's displayed values can be cached/default/last-commanded,
 especially after a power cycle or control by another device. They must not be
 reported by this library as fresh controller observations.
 
+### LED output power: offline APK re-analysis · 2026-11-28
+
+Magical LED 1.2.0 **can update its power icon from a controller notification**.
+`MainActivity$BleListenerImpl.onChanged` decrypts the incoming value and passes
+it to `Agreement.getLight(byte[])`. That parser requires more than eight bytes
+and compares bytes 1–5 with `LEDON` (on) or `LEDOF` (off). It does not check the
+length byte at offset 0 or the second `F`. The listener posts `open_light` or
+`close_light`; `MainActivity.onEvent` calls `setPower` to update the icon.
+These are receive-side matches, not evidence for a request opcode.
+
+The icon alone is not proof of readback. `onReady` also posts `open_light`
+without a power report, `setLedPlateState` posts `close_light` when no devices
+remain connected, and tapping the icon updates it locally before sending the
+power command. The ready sequence sends `TIME` (sets the clock), then `STSC`
+and `STIN`; neither DEX exposed a dedicated read-power command. The outbound
+`LEDON` and `LEDOFF` are setters, not queries.
+
+**Next hardware check:** With LED output already off, then already on, connect
+and subscribe to control notifications (`…9601`) without sending any lighting
+commands. Record the raw and decrypted frames and their timing. This will test
+whether the controller announces its initial state; the earlier capture had
+only `STYPE`, `VER` and `STSC`. If neither run announces power, capture the
+Android app's startup exchange to see whether it receives a report and what
+immediately precedes it. A report that appears only on a transition is useful
+for monitoring, not for querying the initial state. Until a fresh report is
+observed, a read-only power check should return **unknown**, not **off**.
+
+The library now implements that passive check as `Strip.read_power(timeout=5)`
+and the CLI command `magical-led --device DEVICE_ID power-state --wait 5`.
+They use only notifications received during the call, never a cached or
+last-commanded value. The parser and subscription behavior were tested offline.
+
+**Powered-on hardware check (2026-11-28):** The owner confirmed LED output was
+already on. The CLI returned `unknown` after 10 seconds. A second 10-second
+connection using `Strip.read_power()` recorded only `STYPE26X20` at about 31 ms
+after subscription started; the API returned `None`. No lighting or W1 query
+commands were sent, and LED output was not changed. This does not establish
+whether the controller reports power on a state change.
+Raw evidence: `.analysis/power-readback-on-2026-11-28.json` (local and ignored).
+
+**Output-off hardware check (2026-11-28):** The owner turned LED output off
+while leaving the controller reachable over BLE. The same 10-second passive
+read again recorded only `STYPE26X20` at about 31 ms and returned `None`.
+The owner saw the output turn on during connection even though this check did
+not send a lighting or W1 query command. The run did not isolate BLE connection
+from notification subscription, so the precise trigger is unknown. This is not
+a sustained off-state sample. Do not assume a fresh BLE connection leaves LED
+output unchanged. To isolate the trigger, compare a connection without a
+subscription against a connection with one, only when turning on is acceptable.
+Raw evidence: `.analysis/power-readback-off-2026-11-28.json` (local and ignored).
+
 ## Unavailable versus inferred state
 
 No current readback was established for:
@@ -116,10 +167,11 @@ set/store calls are also not current state after a reboot or another writer.
 
 ## Existing API coverage and next step
 
-Already exposed: `read_version`, `read_topology`, raw `notifications`, and
-documented queries via `send(plaintext(...))`. Missing convenience coverage:
-typed VER subversion/schedule getters and a combined status snapshot. No new
-library state API was implemented in this investigation.
+Exposed: `read_version`, `read_version_info`, `read_topology`, `read_schedule`,
+`read_state`, passive `read_power`, raw `notifications`, and documented queries
+via `send(plaintext(...))`. `read_state` / CLI `status` gathers the observed
+fields over one connection, keeps unavailable fields as `None`, and records
+any timeouts or read errors without fabricating defaults.
 
 A future `read_state` / CLI `status` should preserve actual response timestamps,
 raw evidence, query errors/timeouts, and explicit unknown fields (`None`),

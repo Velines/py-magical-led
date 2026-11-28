@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from magical_led import (Strip, Topology, encode_animation, AnimationTransferError,
+from magical_led import (Strip, Topology, StripedEffect, encode_animation, AnimationTransferError,
                          AnimationUploadResult, encrypt, decrypt, power,
                          StorageCapabilities, PersistentStoreResult, StorageUnsupportedError)
 from magical_led.protocol import COMMAND, BULK, SERVICE
@@ -86,7 +86,7 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_consent_before_any_io(self):
         self.strip.read_topology = AsyncMock()
         for operation in (self.strip.upload_animation(self.frames),
-                          self.strip.upload_effect('XMAS 03'), self.strip.store_effect('XMAS 03')):
+                          self.strip.upload_effect('XMAS 01'), self.strip.store_effect('XMAS 01')):
             with self.assertRaises(PermissionError):
                 await operation
         self.strip.read_topology.assert_not_awaited()
@@ -108,15 +108,21 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_buffered_name_uses_transfer_not_pixel_stream(self):
         self.strip.read_storage_capabilities.return_value = StorageCapabilities(None, 'fixture', 4, 2, True, True, False)
-        result = await self.strip.play_effect('XMAS 03', topology=Topology(4, 2))
+        result = await self.strip.play_effect('XMAS 01', topology=Topology(4, 2))
         self.assertIsInstance(result, AnimationUploadResult)
         self.assertEqual(result.frame_count, 4)
         self.assertTrue(all(c.args[0] is self.command or c.args[0] is self.bulk
                             for c in self.client.write_gatt_char.await_args_list))
+        with patch('magical_led.client.asyncio.sleep', new_callable=AsyncMock):
+            stored = await self.strip.play_effect('XMAS 01', topology=Topology(4, 2), persist=True)
+        self.assertIsInstance(stored, PersistentStoreResult)
+        self.assertEqual(stored.upload.frame_count, 4)
+        with self.assertRaisesRegex(ValueError, 'buffered'):
+            await self.strip.play_effect('XMAS 01', topology=Topology(4, 2), delivery='live', persist=True)
         with self.assertRaisesRegex(ValueError, 'loop counts'):
-            await self.strip.play_effect('XMAS 04', topology=Topology(4, 2), repeat=2)
+            await self.strip.play_effect('XMAS 02', topology=Topology(4, 2), repeat=2)
         with self.assertRaisesRegex(ValueError, 'pacing'):
-            await self.strip.play_effect('XMAS 04', topology=Topology(4, 2), pixel_delay=0.01)
+            await self.strip.play_effect('XMAS 02', topology=Topology(4, 2), pixel_delay=0.01)
 
     async def test_errors_timeouts_stop_without_retry_or_finish(self):
         for mode, expected in [('header-timeout', 'MANYOK'), ('chunk-error', 'ERROR'), ('unexpected', 'unexpected')]:
@@ -191,13 +197,14 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_profile_and_full_row_wipe_capacity_fail_before_writes(self):
         self.strip.read_storage_capabilities.return_value = StorageCapabilities(None, 'unknown', 2, 2, False, False, None)
-        for operation in (self.strip.play_effect('XMAS 03'), self.strip.play_animation(self.frames),
-                          self.strip.store_effect('XMAS 03', overwrite=True)):
+        for operation in (self.strip.play_effect('XMAS 01'), self.strip.play_animation(self.frames),
+                          self.strip.store_effect('XMAS 01', overwrite=True)):
             with self.assertRaises(StorageUnsupportedError):
                 await operation
         self.strip.read_storage_capabilities.return_value = StorageCapabilities('STYPE26X20', 'TR2103R001-8', 20, 26, True, True, False)
+        wipe = StripedEffect('Wipe', ((255, 0, 0), (0, 255, 0)), transition='wipe_down')
         with self.assertRaisesRegex(ValueError, '65535'):
-            await self.strip.store_effect('XMAS 01', overwrite=True)
+            await self.strip.store_animation(wipe.frames(Topology(20, 26)), overwrite=True)
         self.client.write_gatt_char.assert_not_awaited()
 
     async def test_capabilities_require_both_firmware_and_model(self):

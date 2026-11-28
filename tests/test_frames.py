@@ -122,7 +122,7 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
                                              repeat=2, brightness=20, pixel_delay=0, command_delay=0)
         writes = self.client.write_gatt_char.await_args_list
         commands = [decrypt(c.args[1]) for c in writes if c.args[0] is self.command]
-        self.assertEqual([c[1:6].rstrip(b'\0') for c in commands], [b'LIGHT', b'EFFE', b'COLO', b'SMVEW'])
+        self.assertEqual([c[1:6].rstrip(b'\0') for c in commands], [b'LIGHT', b'EFFE', b'SMVEW'])
         pixels = [decrypt(c.args[1]) for c in writes if c.args[0] is self.live]
         self.assertEqual([(p[1], p[2]) for p in pixels[:4]], [(0, 0), (0, 1), (1, 0), (1, 1)])
         self.assertEqual(pixels[4][:6], bytes.fromhex('050101341256'))
@@ -214,11 +214,11 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         with patch('magical_led.client.monotonic', side_effect=lambda: clock[0]), \
              patch('magical_led.client.asyncio.sleep', side_effect=sleep):
             result = await self.strip.play_effect('XMAS 01', topology=Topology(4, 2),
-                                                  repeat=2, brightness=20)
-        self.assertEqual(result.frames_sent, 16)
-        self.assertEqual(result.pixel_writes, 38)
+                                                  repeat=2, brightness=20, delivery='live')
+        self.assertEqual(result.frames_sent, 8)
+        self.assertEqual(result.pixel_writes, 36)
         self.assertAlmostEqual(result.elapsed_seconds, 16)
-        self.assertAlmostEqual(clock[0], 18)  # Four setup commands, then two 8 s cycles.
+        self.assertAlmostEqual(clock[0], 16)  # Setup commands (delay=0), then two 8 s cycles.
         self.assertEqual(result.overrun_frames, 0)
 
     async def test_continuous_repeat_does_not_reinitialize_each_cycle(self):
@@ -236,7 +236,7 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
                 await self.strip.play_frames([[[0]], [[0xff0000]]], topology=Topology(1, 1),
                                              repeat=None, pixel_delay=0, command_delay=0)
         calls = self.client.write_gatt_char.await_args_list
-        self.assertEqual(sum(c.args[0] is self.command for c in calls), 3)
+        self.assertEqual(sum(c.args[0] is self.command for c in calls), 2)
         self.assertEqual(sum(c.args[0] is self.live for c in calls), 5)
         self.assertFalse(self.strip._lock.locked())
 
@@ -253,8 +253,9 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         with patch('magical_led.client.asyncio.sleep', side_effect=sleep):
             with self.assertRaises(asyncio.CancelledError):
                 # No repeat argument: pass the four-phase cycle and enter phase 0 again.
-                await self.strip.play_effect('XMAS 01', topology=Topology(4, 1), command_delay=0, initial_pixel_delay=0)
+                await self.strip.play_effect('XMAS 01', topology=Topology(4, 1),
+                                             command_delay=0, initial_pixel_delay=0, delivery='live')
         calls = self.client.write_gatt_char.await_args_list
-        self.assertEqual(sum(call.args[0] is self.command for call in calls), 3)
+        self.assertEqual(sum(call.args[0] is self.command for call in calls), 2)
         self.assertEqual(sum(call.args[0] is self.live for call in calls), 12)
         self.assertFalse(self.strip._lock.locked())

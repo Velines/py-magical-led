@@ -1,6 +1,7 @@
 """Bleak adapter. A Strip borrows a connected client and never disconnects it."""
 import asyncio
 import math
+from datetime import datetime
 from time import monotonic
 from itertools import count as cycles
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -11,6 +12,8 @@ from .frames import Topology, FrameMapping, PlaybackResult, parse_topology, prep
 from .effects import get_effect
 from .buffered import (encode_animation, AnimationUploadResult, AnimationTransferError,
                        StorageCapabilities, PersistentStoreResult, StorageUnsupportedError)
+from .state import (DeviceState, Schedule, VersionInfo,
+                    parse_schedule, parse_version_notification)
 
 
 def _seconds(value, name, *, positive=False):
@@ -71,8 +74,7 @@ class Strip:
         A failed/cancelled sequence can leave partially changed device state;
         no rollback/retry or nonvolatile save is attempted.
         """
-        if not isinstance(delay, (int, float)) or not math.isfinite(delay) or delay < 0:
-            raise ValueError('delay must be a finite nonnegative number of seconds')
+        _seconds(delay, 'delay')
         values = tuple(encrypt(frame) for frame in frames)
         async with self._lock:
             for i, value in enumerate(values):
@@ -82,6 +84,36 @@ class Strip:
 
     async def set_power(self, on: bool) -> None:
         await self.send(protocol.power(on))
+
+    async def read_power(self, timeout: float = 5) -> bool | None:
+        """Wait for a fresh LED-output power report; send no W1 command.
+
+        Return True for on, False for off, or None if no report is received
+        within the deadline, including subscription setup. Never use cached
+        or last-commanded state. Firmware may not report power on connect.
+        """
+        _seconds(timeout, 'timeout', positive=True)
+        result = asyncio.get_running_loop().create_future()
+
+        def received(_raw, frame):
+            if frame is not None and not result.done():
+                state = protocol.parse_power_notification(frame)
+                if state is not None:
+                    result.set_result(state)
+
+        try:
+            async with AsyncExitStack() as subscription:
+                deadline = asyncio.timeout(timeout)
+                try:
+                    async with deadline:
+                        await subscription.enter_async_context(self.notifications(received))
+                        return await result
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                    return None
+        finally:
+            result.cancel()
 
     async def set_color(self, red: int, green: int, blue: int, *,
                         brightness: int | None = None, delay: float = 0.5) -> None:
@@ -112,6 +144,162 @@ class Strip:
 
     async def select_image(self, preset: int) -> None:
         await self.send(protocol.image(preset))
+
+    async def sync_clock(self, local: datetime | None = None) -> None:
+        """Send TIME using the supplied datetime (or current local wall clock)."""
+        if local is not None and not isinstance(local, datetime):
+            raise ValueError('local must be a datetime instance or None')
+        await self.send(protocol.clock(datetime.now() if local is None else local))
+
+    async def set_schedule(self, schedule: Schedule, *, sync_clock: bool = False,
+                           local: datetime | None = None, delay: float = 0.5) -> None:
+        """Write a weekly on/off schedule (SCHD), optionally syncing TIME first."""
+        if not isinstance(schedule, Schedule):
+            raise ValueError('schedule must be a Schedule instance')
+        if local is not None and not isinstance(local, datetime):
+            raise ValueError('local must be a datetime instance or None')
+        frames = (schedule.to_frame(),)
+        if sync_clock:
+            frames = (protocol.clock(datetime.now() if local is None else local),) + frames
+        await self.send_sequence(frames, delay=delay)
+
+    async def _query(self, frame: bytes, parser, timeout: float):
+        _seconds(timeout, 'timeout', positive=True)
+        wire = encrypt(frame)
+        result = asyncio.get_running_loop().create_future()
+
+        def received(_raw, plain):
+            if plain is None or result.done():
+                return
+            try:
+                parsed = parser(plain)
+            except ValueError as exc:
+                result.set_exception(exc)
+            else:
+                if parsed is not None:
+                    result.set_result(parsed)
+
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._lock:
+                    async with self.notifications(received):
+                        await self._write_unlocked(self._command, wire)
+                        return await result
+        finally:
+            if not result.done():
+                result.cancel()
+            elif not result.cancelled():
+                result.exception()
+
+    async def read_version_info(self, timeout: float = 5) -> VersionInfo:
+        """Query encrypted VER notification and return raw SPI/OTA version octets."""
+        return await self._query(protocol.plaintext('VER'), parse_version_notification, timeout)
+
+    async def read_schedule(self, timeout: float = 5) -> Schedule:
+        """Query STSC and return the controller's configured on/off schedule."""
+        return await self._query(protocol.plaintext('STSC'), parse_schedule, timeout)
+
+    async def read_state(self, timeout: float = 3) -> DeviceState:
+        """Read all controller-reported state over one connection without lighting writes.
+
+        Performs direct GATT read of …9602, listens for STYPE and any unsolicited
+        LEDON/LEDOFF power report, and sends read-only VER and STSC queries.
+        Unavailable or timed-out fields remain None and are recorded in errors.
+        """
+        _seconds(timeout, 'timeout', positive=True)
+        read_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        errors = []
+        firmware_raw_hex = None
+        firmware = None
+        try:
+            raw = await self.read_version()
+            firmware_raw_hex = raw.hex()
+            firmware = raw.rstrip(b'\0').decode('ascii', errors='backslashreplace')
+        except Exception as exc:
+            errors.append(f'version_read: {type(exc).__name__}: {exc}')
+
+        loop = asyncio.get_running_loop()
+        topology_fut = loop.create_future()
+        version_fut = loop.create_future()
+        schedule_fut = loop.create_future()
+        power_state = None
+        if self._topology is not None:
+            topology_fut.set_result(self._topology)
+
+        def received(_raw, plain):
+            nonlocal power_state
+            if plain is None:
+                return
+            if not topology_fut.done():
+                try:
+                    topo = parse_topology(plain)
+                except ValueError as exc:
+                    topology_fut.set_exception(exc)
+                else:
+                    if topo is not None:
+                        topology_fut.set_result(topo)
+            if not version_fut.done():
+                ver = parse_version_notification(plain)
+                if ver is not None:
+                    version_fut.set_result(ver)
+            if not schedule_fut.done():
+                try:
+                    sched = parse_schedule(plain)
+                except ValueError as exc:
+                    schedule_fut.set_exception(exc)
+                else:
+                    if sched is not None:
+                        schedule_fut.set_result(sched)
+            reported_power = protocol.parse_power_notification(plain)
+            if reported_power is not None:
+                power_state = reported_power
+
+        version_info = None
+        schedule_val = None
+        topology_val = self._topology
+        try:
+            async with self._lock:
+                async with self.notifications(received):
+                    for label, token, fut in (('ver', 'VER', version_fut), ('schedule', 'STSC', schedule_fut)):
+                        try:
+                            async with asyncio.timeout(timeout):
+                                await self._write_unlocked(self._command, encrypt(protocol.plaintext(token)))
+                                await fut
+                        except TimeoutError:
+                            errors.append(f'{label}: timed out after {timeout:g}s')
+                        except Exception as exc:
+                            errors.append(f'{label}: {type(exc).__name__}: {exc}')
+                    if not topology_fut.done():
+                        try:
+                            async with asyncio.timeout(timeout):
+                                await topology_fut
+                        except TimeoutError:
+                            errors.append(f'topology: timed out after {timeout:g}s')
+                        except Exception as exc:
+                            errors.append(f'topology: {type(exc).__name__}: {exc}')
+            if version_fut.done() and not version_fut.cancelled() and version_fut.exception() is None:
+                version_info = version_fut.result()
+            if schedule_fut.done() and not schedule_fut.cancelled() and schedule_fut.exception() is None:
+                schedule_val = schedule_fut.result()
+            if topology_fut.done() and not topology_fut.cancelled() and topology_fut.exception() is None:
+                topology_val = topology_fut.result()
+        finally:
+            for fut in (topology_fut, version_fut, schedule_fut):
+                if not fut.done():
+                    fut.cancel()
+                elif not fut.cancelled():
+                    fut.exception()
+
+        return DeviceState(
+            firmware_raw_hex=firmware_raw_hex,
+            firmware=firmware,
+            version_info=version_info,
+            topology=topology_val,
+            schedule=schedule_val,
+            power=power_state,
+            read_at=read_at,
+            errors=tuple(errors),
+        )
 
     async def read_topology(self, timeout: float = 5) -> Topology:
         """Listen for STYPE (or use this connection's cached report), no W1 query.
@@ -217,16 +405,19 @@ class Strip:
                           pixel_delay: float = 0, command_delay: float = 0,
                           delivery: str = 'auto',
                           wire_speed: int | None = None,
-                          initial_pixel_delay: float | None = None) -> PlaybackResult | AnimationUploadResult:
-        """Play visual frames without a persistent save; delivery is orthogonal.
+                          initial_pixel_delay: float | None = None,
+                          persist: bool = False) -> PlaybackResult | AnimationUploadResult | PersistentStoreResult:
+        """Play visual frames temporarily or persistently (persist=True).
 
         Auto prefers live for row wipes and buffered for cuts. Buffered play is
         allowed only on a profile whose temporary/persistent isolation was tested.
         It returns after upload and leaves the controller looping autonomously.
-        Live repeat=None runs until cancelled. Use store_effect(overwrite=True)
-        for a deliberate persistent write, never a playback flag or effect name.
+        Live repeat=None runs until cancelled. Pass persist=True to store the
+        effect persistently in the controller's custom slot on a verified profile.
         """
         # trace: SWR-006-AC2
+        if not isinstance(persist, bool):
+            raise ValueError('persist must be a boolean')
         effect = get_effect(name)
         if not isinstance(mapping, FrameMapping):
             raise ValueError('expected a FrameMapping')
@@ -235,6 +426,19 @@ class Strip:
         if topology is not None and not isinstance(topology, Topology):
             raise ValueError('expected a Topology')
         selected = effect.resolve_delivery(delivery)
+        if persist:
+            if delivery == 'live':
+                raise ValueError('persistent storage requires buffered delivery')
+            if repeat is not None:
+                raise ValueError('buffered controller loop counts are not known; omit repeat')
+            if pixel_delay != 0 or command_delay != 0 or initial_pixel_delay is not None:
+                raise ValueError('live pixel/command pacing does not apply to buffered effects')
+            topology, _ = await self._verified_storage_topology(topology, persistent=True)
+            width, height = mapping.input_size(topology)
+            return await self.store_animation(effect.frames(Topology(width, height), direction=direction),
+                                              overwrite=True, topology=topology, mapping=mapping,
+                                              wire_speed=10 if wire_speed is None else wire_speed,
+                                              brightness=brightness)
         if selected == 'buffered':
             if repeat is not None:
                 raise ValueError('buffered controller loop counts are not known; omit repeat')
@@ -300,22 +504,12 @@ class Strip:
                            topology: Topology | None = None, mapping: FrameMapping = FrameMapping(),
                            direction: str = 'right', wire_speed: int = 10,
                            brightness: int | None = None) -> PersistentStoreResult:
-        """Persist the SAME rendered visual sequence; never simplify it to fit.
-
-        The protocol has one unaddressed custom location and no inventory, so
-        explicit overwrite=True is required. Saved speed is not retained by the
-        tested firmware. Oversized row-wipe cycles fail before content writes.
-        """
+        """Persist the SAME rendered visual sequence; delegates to play_effect(persist=True)."""
         if overwrite is not True:
             raise PermissionError('cannot check the saved custom location; pass overwrite=True to permit replacement')
-        effect = get_effect(name)
-        if not isinstance(mapping, FrameMapping):
-            raise ValueError('expected FrameMapping')
-        topology, _ = await self._verified_storage_topology(topology, persistent=True)
-        width, height = mapping.input_size(topology)
-        return await self.store_animation(effect.frames(Topology(width, height), direction=direction),
-                                           overwrite=True, topology=topology, mapping=mapping,
-                                           wire_speed=wire_speed, brightness=brightness)
+        return await self.play_effect(name, topology=topology, mapping=mapping, direction=direction,
+                                      delivery='buffered', wire_speed=wire_speed,
+                                      brightness=brightness, persist=True)
 
     async def store_animation(self, frames, *, overwrite: bool = False,
                               topology: Topology | None = None, mapping: FrameMapping = FrameMapping(),
@@ -348,6 +542,8 @@ class Strip:
         effect = get_effect(name)
         if not isinstance(mapping, FrameMapping):
             raise ValueError('expected FrameMapping')
+        if direction not in ('right', 'left'):
+            raise ValueError('direction must be right or left')
         if topology is None:
             topology = await self.read_topology()
         if not isinstance(topology, Topology):
@@ -504,8 +700,8 @@ class Strip:
     @staticmethod
     def _write_response(char, value):
         props = char.properties
-        max_wwr = char.max_write_without_response_size
-        can_wwr = 'write-without-response' in props and len(value) <= max_wwr
+        can_wwr = ('write-without-response' in props
+                   and len(value) <= char.max_write_without_response_size)
         can_write = 'write' in props
         if can_wwr:
             return False

@@ -106,6 +106,12 @@ class StaticEffect:
     name: str
     base: StripedEffect
 
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError('effect name must be nonempty')
+        if not isinstance(self.base, StripedEffect):
+            raise ValueError('base must be a StripedEffect')
+
     def frames(self, topology: Topology, *, direction: str = 'right'):
         return (self.base.phase_frames(topology, direction=direction)[0],)
 

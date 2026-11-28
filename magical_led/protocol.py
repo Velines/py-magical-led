@@ -39,6 +39,17 @@ def power(on: bool) -> bytes:
     return plaintext('LEDON' if on else 'LEDOFF')
 
 
+def parse_power_notification(frame: bytes) -> bool | None:
+    """Interpret a decrypted notification using the Android app's power parser."""
+    if len(frame) > 8:
+        token = frame[1:6]
+        if token == b'LEDON':
+            return True
+        if token == b'LEDOF':  # The app does not check the second F.
+            return False
+    return None
+
+
 def color(red: int, green: int, blue: int) -> bytes:
     """RGB arguments; the device actually receives GRB."""
     return plaintext('COLO', green, red, blue)

@@ -91,6 +91,10 @@ class EffectTests(unittest.TestCase):
                 StripedEffect(**args)
         with self.assertRaises(ValueError):
             XMAS_01.frames(Topology(20, 26), direction='up')
+        with self.assertRaises(ValueError):
+            StaticEffect('', XMAS_01)
+        with self.assertRaises(ValueError):
+            StaticEffect('bad', 'not-an-effect')
         unique = StripedEffect('large', tuple((i, 0, 0) for i in range(256)), strips_per_band=1)
         with self.assertRaisesRegex(ValueError, 'bounds'):
             unique.frames(Topology(256, 256))
